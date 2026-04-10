@@ -1,7 +1,16 @@
 {
-  "private_key": "0xYOUR_KEY_HERE",
-  "source": { ... },
-  "destination": { ... }
+  "private_key": "0x3575f6b72275bf2fa4682906cebb4962ae92e9c95d1d4cfe22fb7f4d745a623a",
+  "source": {
+    "address": "0x2849A1F9e4700BEe779232396FD803cdcA7d0cde",
+    "abi": [
+      ...
+    ]
+  },
+  "destination": {
+    "address": "0x99Ab2ae5053244E85BC0fbE1A311740295c2afEc",
+    "abi": [
+      ...
+    ]
 }
 
 
