@@ -1,3 +1,10 @@
+{
+  "private_key": "0xYOUR_KEY_HERE",
+  "source": { ... },
+  "destination": { ... }
+}
+
+
 {"source": { "address": "0x2849A1F9e4700BEe779232396FD803cdcA7d0cde",
  "abi": [
   {
