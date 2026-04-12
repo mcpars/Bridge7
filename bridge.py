@@ -86,7 +86,7 @@ def scan_blocks(chain, contract_info="contract_info.json"):
         )
 
         latest = w3.eth.block_number
-        start_block = max(0, latest - 10)
+        start_block = max(0, latest - 5)
 
         events = []
         for block_num in range(start_block, latest + 1):
@@ -141,7 +141,7 @@ def scan_blocks(chain, contract_info="contract_info.json"):
         )
 
         latest = w3.eth.block_number
-        start_block = max(0, latest - 10)
+        start_block = max(0, latest - 5)
 
         events = []
         for block_num in range(start_block, latest + 1):
