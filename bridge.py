@@ -127,7 +127,7 @@ def scan_blocks(chain, contract_info="contract_info.json"):
             processed["source"].append(eid)
             nonce += 1
 
-        else:
+        if chain == "destination":
             w3 = connect_to("destination")
             other_w3 = connect_to("source")
     
@@ -165,8 +165,8 @@ def scan_blocks(chain, contract_info="contract_info.json"):
                 
            
                 tx = source_contract.functions.withdraw(
-                    args["_token"],      # Changed from underlying_token
-                    args["recipient"],  # Changed from to
+                    args["underlying_token"],      
+                    args["to"],  
                     args["amount"]
                 ).build_transaction({
                     "from": acct.address,
