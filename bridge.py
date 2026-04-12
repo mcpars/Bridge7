@@ -127,24 +127,23 @@ def scan_blocks(chain, contract_info="contract_info.json"):
             processed["source"].append(eid)
             nonce += 1
 
-    else:
-        w3 = connect_to("destination")
-        other_w3 = connect_to("source")
-
-        dest_contract = w3.eth.contract(
-            address=Web3.to_checksum_address(full["destination"]["address"]),
-            abi=full["destination"]["abi"]
-        )
-        source_contract = other_w3.eth.contract(
-            address=Web3.to_checksum_address(full["source"]["address"]),
-            abi=full["source"]["abi"]
-        )
-
-        latest = w3.eth.block_number
-        start_block = max(0, latest - 5)
-
-        events = []
-        for block_num in range(start_block, latest + 1):
+        else:
+            w3 = connect_to("destination")
+            other_w3 = connect_to("source")
+    
+            dest_contract = w3.eth.contract(
+                address=Web3.to_checksum_address(full["destination"]["address"]),
+                abi=full["destination"]["abi"]
+            )
+            source_contract = other_w3.eth.contract(
+                address=Web3.to_checksum_address(full["source"]["address"]),
+                abi=full["source"]["abi"]
+            )
+    
+            latest = w3.eth.block_number
+            start_block = max(0, latest - 5)
+    
+            # Get logs once for the range, not inside a loop
             try:
                 events = dest_contract.events.Unwrap().get_logs(
                     from_block=start_block,
@@ -153,34 +152,36 @@ def scan_blocks(chain, contract_info="contract_info.json"):
             except Exception as err:
                 print(f"Error scanning destination logs: {err}")
                 return 0
-
-        events = sorted(events, key=lambda e: (e["blockNumber"], e["logIndex"]))
-        nonce = other_w3.eth.get_transaction_count(acct.address)
-
-        for e in events:
-            eid = event_id(e)
-            if eid in processed["destination"]:
-                continue
-
-            args = e["args"]
-            tx = source_contract.functions.withdraw(
-                args["underlying_token"],
-                args["to"],
-                args["amount"]
-            ).build_transaction({
-                "from": acct.address,
-                "nonce": nonce,
-                "gas": 2000000,
-                "gasPrice": other_w3.eth.gas_price,
-                "chainId": other_w3.eth.chain_id
-            })
-
-            signed = acct.sign_transaction(tx)
-            tx_hash = other_w3.eth.send_raw_transaction(signed.raw_transaction)
-            other_w3.eth.wait_for_transaction_receipt(tx_hash)
-
-            processed["destination"].append(eid)
-            nonce += 1
+    
+            events = sorted(events, key=lambda e: (e["blockNumber"], e["logIndex"]))
+            nonce = other_w3.eth.get_transaction_count(acct.address)
+    
+            for e in events:
+                eid = event_id(e)
+                if eid in processed["destination"]:
+                    continue
+    
+                args = e["args"]
+                
+                # FIX: Check your ABI; usually these are 'token' and 'recipient'
+                tx = source_contract.functions.withdraw(
+                    args["token"],      # Changed from underlying_token
+                    args["recipient"],  # Changed from to
+                    args["amount"]
+                ).build_transaction({
+                    "from": acct.address,
+                    "nonce": nonce,
+                    "gas": 2000000,
+                    "gasPrice": other_w3.eth.gas_price,
+                    "chainId": other_w3.eth.chain_id
+                })
+    
+                signed = acct.sign_transaction(tx)
+                tx_hash = other_w3.eth.send_raw_transaction(signed.raw_transaction)
+                other_w3.eth.wait_for_transaction_receipt(tx_hash)
+    
+                processed["destination"].append(eid)
+                nonce += 1
 
     save_processed(processed)
     return 1
