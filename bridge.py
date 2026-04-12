@@ -69,6 +69,8 @@ def scan_blocks(chain, contract_info="contract_info.json"):
     private_key = full["private_key"]
     acct = Web3().eth.account.from_key(private_key)
     processed = load_processed()
+    processed = {"source": [], "destination": []}
+    
 
     if chain == "source":
         w3 = connect_to("source")
@@ -84,7 +86,7 @@ def scan_blocks(chain, contract_info="contract_info.json"):
         )
 
         latest = w3.eth.block_number
-        start_block = max(0, latest - 25)
+        start_block = max(0, latest - 10)
 
         events = []
         for block_num in range(start_block, latest + 1):
@@ -139,7 +141,7 @@ def scan_blocks(chain, contract_info="contract_info.json"):
         )
 
         latest = w3.eth.block_number
-        start_block = max(0, latest - 25)
+        start_block = max(0, latest - 10)
 
         events = []
         for block_num in range(start_block, latest + 1):
