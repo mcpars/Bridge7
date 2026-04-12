@@ -163,9 +163,9 @@ def scan_blocks(chain, contract_info="contract_info.json"):
     
                 args = e["args"]
                 
-                # FIX: Check your ABI; usually these are 'token' and 'recipient'
+           
                 tx = source_contract.functions.withdraw(
-                    args["token"],      # Changed from underlying_token
+                    args["_token"],      # Changed from underlying_token
                     args["recipient"],  # Changed from to
                     args["amount"]
                 ).build_transaction({
