@@ -91,13 +91,13 @@ def scan_blocks(chain, contract_info="contract_info.json"):
         events = []
         for block_num in range(start_block, latest + 1):
             try:
-                block_events = source_contract.events.Deposit().get_logs(
+                events = source_contract.events.Deposit().get_logs(
                     from_block=start_block,
                     to_block=latest
                 )
-                events.extend(block_events)
             except Exception as err:
-                print(f"Skipping source block {block_num}: {err}")
+                print(f"Error scanning source logs: {err}")
+                return 0
 
         events = sorted(events, key=lambda e: (e["blockNumber"], e["logIndex"]))
         nonce = other_w3.eth.get_transaction_count(acct.address)
@@ -146,13 +146,13 @@ def scan_blocks(chain, contract_info="contract_info.json"):
         events = []
         for block_num in range(start_block, latest + 1):
             try:
-                block_events = dest_contract.events.Unwrap().get_logs(
+                events = dest_contract.events.Unwrap().get_logs(
                     from_block=start_block,
                     to_block=latest
                 )
-                events.extend(block_events)
             except Exception as err:
-                print(f"Skipping destination block {block_num}: {err}")
+                print(f"Error scanning destination logs: {err}")
+                return 0
 
         events = sorted(events, key=lambda e: (e["blockNumber"], e["logIndex"]))
         nonce = other_w3.eth.get_transaction_count(acct.address)
