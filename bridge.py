@@ -95,7 +95,7 @@ def scan_blocks(chain, contract_info="contract_info.json"):
             })
     
             signed = acct.sign_transaction(tx)
-            other_w3.eth.send_raw_transaction(signed.rawTransaction)
+            other_w3.eth.send_raw_transaction(signed.raw_transaction)
             nonce += 1
 
 
@@ -137,5 +137,5 @@ def scan_blocks(chain, contract_info="contract_info.json"):
             })
     
             signed = acct.sign_transaction(tx)
-            other_w3.eth.send_raw_transaction(signed.rawTransaction)
+            other_w3.eth.send_raw_transaction(signed.raw_transaction)
             nonce += 1
