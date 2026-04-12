@@ -165,8 +165,8 @@ def scan_blocks(chain, contract_info="contract_info.json"):
                 
            
                 tx = source_contract.functions.withdraw(
-                    args["underlying_token"],      
-                    args["to"],  
+                    args["token"],
+                    args["recipient"],
                     args["amount"]
                 ).build_transaction({
                     "from": acct.address,
