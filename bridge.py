@@ -69,7 +69,7 @@ def scan_blocks(chain, contract_info="contract_info.json"):
     private_key = full["private_key"]
     acct = Web3().eth.account.from_key(private_key)
     processed = load_processed()
-    processed = {"source": [], "destination": []}
+   
     
 
     if chain == "source":
@@ -92,8 +92,8 @@ def scan_blocks(chain, contract_info="contract_info.json"):
         for block_num in range(start_block, latest + 1):
             try:
                 block_events = source_contract.events.Deposit().get_logs(
-                    from_block=block_num,
-                    to_block=block_num
+                    from_block=start_block,
+                    to_block=latest
                 )
                 events.extend(block_events)
             except Exception as err:
@@ -147,8 +147,8 @@ def scan_blocks(chain, contract_info="contract_info.json"):
         for block_num in range(start_block, latest + 1):
             try:
                 block_events = dest_contract.events.Unwrap().get_logs(
-                    from_block=block_num,
-                    to_block=block_num
+                    from_block=start_block,
+                    to_block=latest
                 )
                 events.extend(block_events)
             except Exception as err:
