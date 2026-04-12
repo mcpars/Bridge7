@@ -3,6 +3,7 @@ from web3.providers.rpc import HTTPProvider
 from web3.middleware import ExtraDataToPOAMiddleware #Necessary for POA chains
 from datetime import datetime
 import json
+import os
 import pandas as pd
 
 
@@ -33,7 +34,20 @@ def get_contract_info(chain, contract_info):
         return 0
     return contracts[chain]
 
+PROCESSED_FILE = "processed_events.json"
 
+def load_processed():
+    if not os.path.exists(PROCESSED_FILE):
+        return {"source": [], "destination": []}
+    with open(PROCESSED_FILE, "r") as f:
+        return json.load(f)
+
+def save_processed(data):
+    with open(PROCESSED_FILE, "w") as f:
+        json.dump(data, f)
+
+def event_id(event):
+    return f"{event['transactionHash'].hex()}-{event['logIndex']}"
 
 def scan_blocks(chain, contract_info="contract_info.json"):
     """
@@ -52,8 +66,9 @@ def scan_blocks(chain, contract_info="contract_info.json"):
     with open(contract_info, "r") as f:
         full = json.load(f)
 
-    private_key = full.get("private_key")
+    private_key = full["private_key"]
     acct = Web3().eth.account.from_key(private_key)
+    processed = load_processed()
 
     if chain == "source":
         w3 = connect_to("source")
@@ -63,28 +78,34 @@ def scan_blocks(chain, contract_info="contract_info.json"):
             address=Web3.to_checksum_address(full["source"]["address"]),
             abi=full["source"]["abi"]
         )
-
         dest_contract = other_w3.eth.contract(
             address=Web3.to_checksum_address(full["destination"]["address"]),
             abi=full["destination"]["abi"]
         )
 
         latest = w3.eth.block_number
-        start_block = max(0, latest - 5)
+        start_block = max(0, latest - 25)
 
         events = []
         for block_num in range(start_block, latest + 1):
-            block_events = source_contract.events.Deposit().get_logs(
-                from_block=block_num,
-                to_block=block_num
-            )
-            events.extend(block_events)
+            try:
+                block_events = source_contract.events.Deposit().get_logs(
+                    from_block=block_num,
+                    to_block=block_num
+                )
+                events.extend(block_events)
+            except Exception as err:
+                print(f"Skipping source block {block_num}: {err}")
 
+        events = sorted(events, key=lambda e: (e["blockNumber"], e["logIndex"]))
         nonce = other_w3.eth.get_transaction_count(acct.address)
 
         for e in events:
-            args = e["args"]
+            eid = event_id(e)
+            if eid in processed["source"]:
+                continue
 
+            args = e["args"]
             tx = dest_contract.functions.wrap(
                 args["token"],
                 args["recipient"],
@@ -100,9 +121,11 @@ def scan_blocks(chain, contract_info="contract_info.json"):
             signed = acct.sign_transaction(tx)
             tx_hash = other_w3.eth.send_raw_transaction(signed.raw_transaction)
             other_w3.eth.wait_for_transaction_receipt(tx_hash)
+
+            processed["source"].append(eid)
             nonce += 1
 
-    elif chain == "destination":
+    else:
         w3 = connect_to("destination")
         other_w3 = connect_to("source")
 
@@ -110,14 +133,13 @@ def scan_blocks(chain, contract_info="contract_info.json"):
             address=Web3.to_checksum_address(full["destination"]["address"]),
             abi=full["destination"]["abi"]
         )
-
         source_contract = other_w3.eth.contract(
             address=Web3.to_checksum_address(full["source"]["address"]),
             abi=full["source"]["abi"]
         )
 
         latest = w3.eth.block_number
-        start_block = max(0, latest - 5)
+        start_block = max(0, latest - 25)
 
         events = []
         for block_num in range(start_block, latest + 1):
@@ -128,13 +150,17 @@ def scan_blocks(chain, contract_info="contract_info.json"):
                 )
                 events.extend(block_events)
             except Exception as err:
-                print(f"Skipping block {block_num}: {err}")
+                print(f"Skipping destination block {block_num}: {err}")
 
+        events = sorted(events, key=lambda e: (e["blockNumber"], e["logIndex"]))
         nonce = other_w3.eth.get_transaction_count(acct.address)
 
         for e in events:
-            args = e["args"]
+            eid = event_id(e)
+            if eid in processed["destination"]:
+                continue
 
+            args = e["args"]
             tx = source_contract.functions.withdraw(
                 args["underlying_token"],
                 args["to"],
@@ -150,6 +176,9 @@ def scan_blocks(chain, contract_info="contract_info.json"):
             signed = acct.sign_transaction(tx)
             tx_hash = other_w3.eth.send_raw_transaction(signed.raw_transaction)
             other_w3.eth.wait_for_transaction_receipt(tx_hash)
+
+            processed["destination"].append(eid)
             nonce += 1
 
+    save_processed(processed)
     return 1
