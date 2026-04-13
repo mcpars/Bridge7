@@ -34,154 +34,164 @@ def get_contract_info(chain, contract_info):
         return 0
     return contracts[chain]
 
-PROCESSED_FILE = "processed_events.json"
+def _get_private_key(contracts):
+    """
+    Try a few likely field names for the bridge warden private key.
+    Put one of these in contract_info.json at top level or inside each chain entry.
+    """
+    candidate_keys = [
+        "private_key",
+        "warden_private_key",
+        "deployer_private_key",
+        "signing_key",
+        "key",
+    ]
 
-def load_processed():
-    if not os.path.exists(PROCESSED_FILE):
-        return {"source": [], "destination": []}
-    with open(PROCESSED_FILE, "r") as f:
+    for k in candidate_keys:
+        if k in contracts:
+            return contracts[k]
+
+    for side in ["source", "destination"]:
+        if side in contracts and isinstance(contracts[side], dict):
+            for k in candidate_keys:
+                if k in contracts[side]:
+                    return contracts[side][k]
+
+    raise KeyError("No private key found in contract_info.json")
+
+
+def _load_all_contract_data(contract_info_file):
+    with open(contract_info_file, "r") as f:
         return json.load(f)
 
-def save_processed(data):
-    with open(PROCESSED_FILE, "w") as f:
-        json.dump(data, f)
 
-def event_id(event):
-    return f"{event['transactionHash'].hex()}-{event['logIndex']}"
+def _build_signed_tx(w3, tx, private_key):
+    signed = w3.eth.account.sign_transaction(tx, private_key=private_key)
+    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+    return tx_hash.hex()
+
+
+def _process_source_deposits(w3_source, w3_dest, source_contract, dest_contract, private_key):
+    latest = w3_source.eth.block_number
+    from_block = max(0, latest - 5)
+
+    deposit_events = source_contract.events.Deposit().get_logs(
+        from_block=from_block,
+        to_block=latest
+    )
+
+    sender = w3_dest.eth.account.from_key(private_key).address
+    chain_id = w3_dest.eth.chain_id
+    nonce = w3_dest.eth.get_transaction_count(sender)
+
+    tx_hashes = []
+
+    for event in deposit_events:
+        token = event["args"]["token"]
+        recipient = event["args"]["recipient"]
+        amount = event["args"]["amount"]
+
+        tx = dest_contract.functions.wrap(
+            token,
+            recipient,
+            amount
+        ).build_transaction({
+            "from": sender,
+            "nonce": nonce,
+            "chainId": chain_id,
+            "gasPrice": w3_dest.eth.gas_price,
+        })
+
+        # estimate gas if possible
+        try:
+            tx["gas"] = w3_dest.eth.estimate_gas(tx)
+        except Exception:
+            tx["gas"] = 300000
+
+        tx_hashes.append(_build_signed_tx(w3_dest, tx, private_key))
+        nonce += 1
+
+    return tx_hashes
+
+
+def _process_destination_unwraps(w3_dest, w3_source, dest_contract, source_contract, private_key):
+    latest = w3_dest.eth.block_number
+    from_block = max(0, latest - 5)
+
+    unwrap_events = dest_contract.events.Unwrap().get_logs(
+        from_block=from_block,
+        to_block=latest
+    )
+
+    sender = w3_source.eth.account.from_key(private_key).address
+    chain_id = w3_source.eth.chain_id
+    nonce = w3_source.eth.get_transaction_count(sender)
+
+    tx_hashes = []
+
+    for event in unwrap_events:
+        underlying_token = event["args"]["underlying_token"]
+        recipient = event["args"]["to"]
+        amount = event["args"]["amount"]
+
+        tx = source_contract.functions.withdraw(
+            underlying_token,
+            recipient,
+            amount
+        ).build_transaction({
+            "from": sender,
+            "nonce": nonce,
+            "chainId": chain_id,
+            "gasPrice": w3_source.eth.gas_price,
+        })
+
+        try:
+            tx["gas"] = w3_source.eth.estimate_gas(tx)
+        except Exception:
+            tx["gas"] = 300000
+
+        tx_hashes.append(_build_signed_tx(w3_source, tx, private_key))
+        nonce += 1
+
+    return tx_hashes
+
 
 def scan_blocks(chain, contract_info="contract_info.json"):
     """
-        chain - (string) should be either "source" or "destination"
-        Scan the last 5 blocks of the source and destination chains
-        Look for 'Deposit' events on the source chain and 'Unwrap' events on the destination chain
-        When Deposit events are found on the source chain, call the 'wrap' function the destination chain
-        When Unwrap events are found on the destination chain, call the 'withdraw' function on the source chain
+    chain - should be either "source" or "destination"
+
+    Scan the last 5 blocks:
+    - On source: look for Deposit and call wrap() on destination
+    - On destination: look for Unwrap and call withdraw() on source
     """
-
-    # This is different from Bridge IV where chain was "avax" or "bsc"
-    if chain not in ['source','destination']:
-        print( f"Invalid chain: {chain}" )
+    if chain not in ["source", "destination"]:
+        print(f"Invalid chain: {chain}")
         return 0
-    
-    with open(contract_info, "r") as f:
-        full = json.load(f)
 
-    private_key = full["private_key"]
-    acct = Web3().eth.account.from_key(private_key)
-    processed = load_processed()
-   
-    
+    contracts = _load_all_contract_data(contract_info)
+    private_key = _get_private_key(contracts)
+
+    source_info = contracts["source"]
+    dest_info = contracts["destination"]
+
+    w3_source = connect_to("source")
+    w3_dest = connect_to("destination")
+
+    source_contract = w3_source.eth.contract(
+        address=Web3.to_checksum_address(source_info["address"]),
+        abi=source_info["abi"]
+    )
+    dest_contract = w3_dest.eth.contract(
+        address=Web3.to_checksum_address(dest_info["address"]),
+        abi=dest_info["abi"]
+    )
 
     if chain == "source":
-        w3 = connect_to("source")
-        other_w3 = connect_to("destination")
-
-        source_contract = w3.eth.contract(
-            address=Web3.to_checksum_address(full["source"]["address"]),
-            abi=full["source"]["abi"]
-        )
-        dest_contract = other_w3.eth.contract(
-            address=Web3.to_checksum_address(full["destination"]["address"]),
-            abi=full["destination"]["abi"]
+        return _process_source_deposits(
+            w3_source, w3_dest, source_contract, dest_contract, private_key
         )
 
-        latest = w3.eth.block_number
-        start_block = max(0, latest - 5)
-
-        events = []
-        for block_num in range(start_block, latest + 1):
-            try:
-                events = source_contract.events.Deposit().get_logs(
-                    from_block=start_block,
-                    to_block=latest
-                )
-            except Exception as err:
-                print(f"Error scanning source logs: {err}")
-                return 0
-
-        events = sorted(events, key=lambda e: (e["blockNumber"], e["logIndex"]))
-        nonce = other_w3.eth.get_transaction_count(acct.address)
-
-        for e in events:
-            eid = event_id(e)
-            if eid in processed["source"]:
-                continue
-
-            args = e["args"]
-            tx = dest_contract.functions.wrap(
-                args["token"],
-                args["recipient"],
-                args["amount"]
-            ).build_transaction({
-                "from": acct.address,
-                "nonce": nonce,
-                "gas": 2000000,
-                "gasPrice": other_w3.eth.gas_price,
-                "chainId": other_w3.eth.chain_id
-            })
-
-            signed = acct.sign_transaction(tx)
-            tx_hash = other_w3.eth.send_raw_transaction(signed.raw_transaction)
-            other_w3.eth.wait_for_transaction_receipt(tx_hash)
-
-            processed["source"].append(eid)
-            nonce += 1
-
-        if chain == "destination":
-            w3 = connect_to("destination")
-            other_w3 = connect_to("source")
-    
-            dest_contract = w3.eth.contract(
-                address=Web3.to_checksum_address(full["destination"]["address"]),
-                abi=full["destination"]["abi"]
-            )
-            source_contract = other_w3.eth.contract(
-                address=Web3.to_checksum_address(full["source"]["address"]),
-                abi=full["source"]["abi"]
-            )
-    
-            latest = w3.eth.block_number
-            start_block = max(0, latest - 5)
-    
-            # Get logs once for the range, not inside a loop
-            try:
-                events = dest_contract.events.Unwrap().get_logs(
-                    from_block=start_block,
-                    to_block=latest
-                )
-            except Exception as err:
-                print(f"Error scanning destination logs: {err}")
-                return 0
-    
-            events = sorted(events, key=lambda e: (e["blockNumber"], e["logIndex"]))
-            nonce = other_w3.eth.get_transaction_count(acct.address)
-    
-            for e in events:
-                eid = event_id(e)
-                if eid in processed["destination"]:
-                    continue
-    
-                args = e["args"]
-                
-           
-                tx = source_contract.functions.withdraw(
-                    args["token"],
-                    args["recipient"],
-                    args["amount"]
-                ).build_transaction({
-                    "from": acct.address,
-                    "nonce": nonce,
-                    "gas": 2000000,
-                    "gasPrice": other_w3.eth.gas_price,
-                    "chainId": other_w3.eth.chain_id
-                })
-    
-                signed = acct.sign_transaction(tx)
-                tx_hash = other_w3.eth.send_raw_transaction(signed.raw_transaction)
-                other_w3.eth.wait_for_transaction_receipt(tx_hash)
-    
-                processed["destination"].append(eid)
-                nonce += 1
-
-    save_processed(processed)
-    return 1
+    if chain == "destination":
+        return _process_destination_unwraps(
+            w3_dest, w3_source, dest_contract, source_contract, private_key
+        )
