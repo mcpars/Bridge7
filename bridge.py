@@ -155,6 +155,22 @@ def _process_destination_unwraps(w3_dest, w3_source, dest_contract, source_contr
 
     return tx_hashes
 
+def event_id(event):
+    """Generates a unique ID for an event to prevent double-processing."""
+    # Combining transaction hash and log index ensures uniqueness within a block
+    return f"{event['transactionHash'].hex()}_{event['logIndex']}"
+
+def load_processed():
+    """Loads the list of already processed event IDs from a local JSON file."""
+    if os.path.exists("processed_events.json"):
+        with open("processed_events.json", "r") as f:
+            return json.load(f)
+    return {"source": [], "destination": []}
+
+def save_processed(processed_data):
+    """Saves the updated list of processed event IDs."""
+    with open("processed_events.json", "w") as f:
+        json.dump(processed_data, f)
 
 def scan_blocks(chain, contract_info="contract_info.json"):
     if chain not in ['source','destination']:
