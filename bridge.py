@@ -20,10 +20,6 @@ def connect_to(chain):
 
 
 def get_contract_info(chain, contract_info):
-    """
-    Load the contract_info file into a dictionary.
-    This function is used by the autograder and may also be useful directly.
-    """
     try:
         with open(contract_info, 'r') as f:
             contracts = json.load(f)
@@ -66,10 +62,10 @@ def sign_and_send_tx(w3, tx, private_key):
     return receipt.transactionHash.hex()
 
 
-def build_tx(w3, function_call, sender_address):
+def build_tx(w3, function_call, sender_address, nonce):
     return function_call.build_transaction({
         "from": sender_address,
-        "nonce": w3.eth.get_transaction_count(sender_address),
+        "nonce": nonce,
         "gas": 500000,
         "gasPrice": w3.eth.gas_price,
         "chainId": w3.eth.chain_id
@@ -110,14 +106,6 @@ def decode_contract_events_from_block(w3, contract, block_num):
 
 
 def scan_blocks(chain, contract_info="contract_info.json"):
-    """
-    chain - should be either "source" or "destination"
-
-    Scans recent blocks on the requested chain:
-    - source: look for Deposit events and call wrap() on destination
-    - destination: look for Unwrap events and call withdraw() on source
-    """
-
     if chain not in ['source', 'destination']:
         print(f"Invalid chain: {chain}")
         return 0
@@ -145,6 +133,7 @@ def scan_blocks(chain, contract_info="contract_info.json"):
         latest_block = source_w3.eth.block_number
         from_block = max(0, latest_block - 20)
         to_block = latest_block
+        dest_nonce = destination_w3.eth.get_transaction_count(sender_address)
 
         print(f"Scanning source chain blocks {from_block} to {to_block}")
 
@@ -179,13 +168,15 @@ def scan_blocks(chain, contract_info="contract_info.json"):
                         recipient,
                         amount
                     ),
-                    sender_address
+                    sender_address,
+                    dest_nonce
                 )
 
                 try:
                     tx_hash = sign_and_send_tx(destination_w3, tx, private_key)
                     print(f"wrap() sent on destination chain: {tx_hash}")
                     state["processed_source_deposits"].append(event_id)
+                    dest_nonce += 1
                 except Exception as e:
                     print(f"Failed to call wrap(): {e}")
 
@@ -193,6 +184,7 @@ def scan_blocks(chain, contract_info="contract_info.json"):
         latest_block = destination_w3.eth.block_number
         from_block = max(0, latest_block - 20)
         to_block = latest_block
+        source_nonce = source_w3.eth.get_transaction_count(sender_address)
 
         print(f"Scanning destination chain blocks {from_block} to {to_block}")
 
@@ -231,13 +223,15 @@ def scan_blocks(chain, contract_info="contract_info.json"):
                         recipient,
                         amount
                     ),
-                    sender_address
+                    sender_address,
+                    source_nonce
                 )
 
                 try:
                     tx_hash = sign_and_send_tx(source_w3, tx, private_key)
                     print(f"withdraw() sent on source chain: {tx_hash}")
                     state["processed_destination_unwraps"].append(event_id)
+                    source_nonce += 1
                 except Exception as e:
                     print(f"Failed to call withdraw(): {e}")
 
