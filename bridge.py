@@ -6,6 +6,7 @@ import json
 import os
 import pandas as pd
 
+CHUNK_SIZE = 500 
 
 def connect_to(chain):
     if chain == 'source':  # The source contract chain is avax
