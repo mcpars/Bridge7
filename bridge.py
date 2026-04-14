@@ -20,6 +20,10 @@ def connect_to(chain):
 
 
 def get_contract_info(chain, contract_info):
+    """
+    Load the contract_info file into a dictionary.
+    This function is used by the autograder and may also be useful directly.
+    """
     try:
         with open(contract_info, 'r') as f:
             contracts = json.load(f)
@@ -34,15 +38,13 @@ def load_full_contract_info(contract_info="contract_info.json"):
         return json.load(f)
 
 
-def load_state(source_w3, destination_w3, state_file=STATE_FILE):
+def load_state(state_file=STATE_FILE):
     path = Path(state_file)
     if path.exists():
         with open(path, "r") as f:
             return json.load(f)
 
     return {
-        "last_source_block": max(0, source_w3.eth.block_number - 5),
-        "last_destination_block": max(0, destination_w3.eth.block_number - 5),
         "processed_source_deposits": [],
         "processed_destination_unwraps": []
     }
@@ -86,13 +88,16 @@ def decode_contract_events_from_block(w3, contract, block_num):
             continue
 
         for log in receipt["logs"]:
-            if Web3.to_checksum_address(log["address"]) != contract_address:
+            try:
+                if Web3.to_checksum_address(log["address"]) != contract_address:
+                    continue
+            except Exception:
                 continue
 
-            # Try each event type defined on the contract ABI
             for event_name in ["Deposit", "Unwrap"]:
                 if not hasattr(contract.events, event_name):
                     continue
+
                 event_cls = getattr(contract.events, event_name)
                 try:
                     decoded = event_cls().process_log(log)
@@ -105,6 +110,14 @@ def decode_contract_events_from_block(w3, contract, block_num):
 
 
 def scan_blocks(chain, contract_info="contract_info.json"):
+    """
+    chain - should be either "source" or "destination"
+
+    Scans recent blocks on the requested chain:
+    - source: look for Deposit events and call wrap() on destination
+    - destination: look for Unwrap events and call withdraw() on source
+    """
+
     if chain not in ['source', 'destination']:
         print(f"Invalid chain: {chain}")
         return 0
@@ -126,11 +139,11 @@ def scan_blocks(chain, contract_info="contract_info.json"):
         abi=contracts["destination"]["abi"]
     )
 
-    state = load_state(source_w3, destination_w3)
+    state = load_state()
 
     if chain == "source":
         latest_block = source_w3.eth.block_number
-        from_block = max(state["last_source_block"] + 1, latest_block - 4)
+        from_block = max(0, latest_block - 20)
         to_block = latest_block
 
         print(f"Scanning source chain blocks {from_block} to {to_block}")
@@ -176,11 +189,9 @@ def scan_blocks(chain, contract_info="contract_info.json"):
                 except Exception as e:
                     print(f"Failed to call wrap(): {e}")
 
-        state["last_source_block"] = to_block
-
     elif chain == "destination":
         latest_block = destination_w3.eth.block_number
-        from_block = max(state["last_destination_block"] + 1, latest_block - 4)
+        from_block = max(0, latest_block - 20)
         to_block = latest_block
 
         print(f"Scanning destination chain blocks {from_block} to {to_block}")
@@ -229,8 +240,6 @@ def scan_blocks(chain, contract_info="contract_info.json"):
                     state["processed_destination_unwraps"].append(event_id)
                 except Exception as e:
                     print(f"Failed to call withdraw(): {e}")
-
-        state["last_destination_block"] = to_block
 
     save_state(state)
     return 1
