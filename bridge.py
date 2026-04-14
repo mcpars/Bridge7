@@ -34,266 +34,203 @@ def get_contract_info(chain, contract_info):
         return 0
     return contracts[chain]
 
-def _get_private_key(contracts):
-    """
-    Try a few likely field names for the bridge warden private key.
-    Put one of these in contract_info.json at top level or inside each chain entry.
-    """
-    candidate_keys = [
-        "private_key",
-        "warden_private_key",
-        "deployer_private_key",
-        "signing_key",
-        "key",
-    ]
-
-    for k in candidate_keys:
-        if k in contracts:
-            return contracts[k]
-
-    for side in ["source", "destination"]:
-        if side in contracts and isinstance(contracts[side], dict):
-            for k in candidate_keys:
-                if k in contracts[side]:
-                    return contracts[side][k]
-
-    raise KeyError("No private key found in contract_info.json")
+def event_id(event):
+    return f"{event['transactionHash'].hex()}_{event['logIndex']}"
 
 
-def _load_all_contract_data(contract_info_file):
-    with open(contract_info_file, "r") as f:
-        return json.load(f)
+def load_state():
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, "r") as f:
+            state = json.load(f)
+    else:
+        state = {}
+
+    state.setdefault("processed", {})
+    state["processed"].setdefault("source", [])
+    state["processed"].setdefault("destination", [])
+
+    state.setdefault("last_scanned", {})
+    state["last_scanned"].setdefault("source", 0)
+    state["last_scanned"].setdefault("destination", 0)
+
+    return state
 
 
-def _build_signed_tx(w3, tx, private_key):
-    signed = w3.eth.account.sign_transaction(tx, private_key=private_key)
+def save_state(state):
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2)
+
+
+def get_logs_chunked(event_builder, from_block, to_block, chunk_size=CHUNK_SIZE):
+    logs = []
+    start = from_block
+
+    while start <= to_block:
+        end = min(start + chunk_size - 1, to_block)
+        chunk_logs = event_builder.get_logs(from_block=start, to_block=end)
+        logs.extend(chunk_logs)
+        start = end + 1
+
+    return logs
+
+
+def build_and_send_tx(w3, account, tx_func, nonce):
+    tx = tx_func.build_transaction({
+        "from": account.address,
+        "nonce": nonce,
+        "chainId": w3.eth.chain_id,
+        "gasPrice": w3.eth.gas_price,
+    })
+
+    try:
+        tx["gas"] = w3.eth.estimate_gas(tx)
+    except Exception:
+        tx["gas"] = 500000
+
+    signed = account.sign_transaction(tx)
     tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+    receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
+
+    if receipt.status != 1:
+        raise RuntimeError(f"Transaction failed: {tx_hash.hex()}")
+
     return tx_hash.hex()
 
 
-def _process_source_deposits(w3_source, w3_dest, source_contract, dest_contract, private_key):
-    latest = w3_source.eth.block_number
-    from_block = max(0, latest - 5)
-
-    deposit_events = source_contract.events.Deposit().get_logs(
-        from_block=from_block,
-        to_block=latest
-    )
-
-    sender = w3_dest.eth.account.from_key(private_key).address
-    chain_id = w3_dest.eth.chain_id
-    nonce = w3_dest.eth.get_transaction_count(sender)
-
-    tx_hashes = []
-
-    for event in deposit_events:
-        token = event["args"]["token"]
-        recipient = event["args"]["recipient"]
-        amount = event["args"]["amount"]
-
-        tx = dest_contract.functions.wrap(
-            token,
-            recipient,
-            amount
-        ).build_transaction({
-            "from": sender,
-            "nonce": nonce,
-            "chainId": chain_id,
-            "gasPrice": w3_dest.eth.gas_price,
-        })
-
-        # estimate gas if possible
-        try:
-            tx["gas"] = w3_dest.eth.estimate_gas(tx)
-        except Exception:
-            tx["gas"] = 300000
-
-        tx_hashes.append(_build_signed_tx(w3_dest, tx, private_key))
-        nonce += 1
-
-    return tx_hashes
-
-
-def _process_destination_unwraps(w3_dest, w3_source, dest_contract, source_contract, private_key):
-    latest = w3_dest.eth.block_number
-    from_block = max(0, latest - 5)
-
-    unwrap_events = dest_contract.events.Unwrap().get_logs(
-        from_block=from_block,
-        to_block=latest
-    )
-
-    sender = w3_source.eth.account.from_key(private_key).address
-    chain_id = w3_source.eth.chain_id
-    nonce = w3_source.eth.get_transaction_count(sender)
-
-    tx_hashes = []
-
-    for event in unwrap_events:
-        underlying_token = event["args"]["underlying_token"]
-        recipient = event["args"]["to"]
-        amount = event["args"]["amount"]
-
-        tx = source_contract.functions.withdraw(
-            underlying_token,
-            recipient,
-            amount
-        ).build_transaction({
-            "from": sender,
-            "nonce": nonce,
-            "chainId": chain_id,
-            "gasPrice": w3_source.eth.gas_price,
-        })
-
-        try:
-            tx["gas"] = w3_source.eth.estimate_gas(tx)
-        except Exception:
-            tx["gas"] = 300000
-
-        tx_hashes.append(_build_signed_tx(w3_source, tx, private_key))
-        nonce += 1
-
-    return tx_hashes
-
-def event_id(event):
-    """Generates a unique ID for an event to prevent double-processing."""
-    # Combining transaction hash and log index ensures uniqueness within a block
-    return f"{event['transactionHash'].hex()}_{event['logIndex']}"
-
-def load_processed():
-    """Loads the list of already processed event IDs from a local JSON file."""
-    if os.path.exists("processed_events.json"):
-        with open("processed_events.json", "r") as f:
-            return json.load(f)
-    return {"source": [], "destination": []}
-
-def save_processed(processed_data):
-    """Saves the updated list of processed event IDs."""
-    with open("processed_events.json", "w") as f:
-        json.dump(processed_data, f)
-
 def scan_blocks(chain, contract_info="contract_info.json"):
-    if chain not in ['source','destination']:
+    if chain not in ["source", "destination"]:
         print(f"Invalid chain: {chain}")
         return 0
-    
+
     with open(contract_info, "r") as f:
         full = json.load(f)
 
     private_key = full["private_key"]
     acct = Web3().eth.account.from_key(private_key)
-    processed = load_processed()
+    state = load_state()
 
-    # --- SOURCE CHAIN LOGIC ---
     if chain == "source":
-        w3 = connect_to("source")
-        other_w3 = connect_to("destination")
+        w3_source = connect_to("source")
+        w3_dest = connect_to("destination")
 
-        source_contract = w3.eth.contract(
+        source_contract = w3_source.eth.contract(
             address=Web3.to_checksum_address(full["source"]["address"]),
             abi=full["source"]["abi"]
         )
-        dest_contract = other_w3.eth.contract(
+        dest_contract = w3_dest.eth.contract(
             address=Web3.to_checksum_address(full["destination"]["address"]),
             abi=full["destination"]["abi"]
         )
 
-        latest = w3.eth.block_number
-        start_block = max(0, latest - 5)
+        latest = w3_source.eth.block_number
+        from_block = state["last_scanned"]["source"] + 1
 
-      
+        if from_block > latest:
+            return 1
+
         try:
-            events = source_contract.events.Deposit().get_logs(
-                from_block=start_block,
-                to_block=latest
+            events = get_logs_chunked(
+                source_contract.events.Deposit(),
+                from_block,
+                latest,
+                CHUNK_SIZE
             )
         except Exception as err:
             print(f"Error scanning source logs: {err}")
             return 0
 
         events = sorted(events, key=lambda e: (e["blockNumber"], e["logIndex"]))
-        nonce = other_w3.eth.get_transaction_count(acct.address)
+        processed_set = set(state["processed"]["source"])
+        nonce = w3_dest.eth.get_transaction_count(acct.address)
 
         for e in events:
             eid = event_id(e)
-            if eid in processed["source"]:
+            if eid in processed_set:
                 continue
 
             args = e["args"]
-            tx = dest_contract.functions.wrap(
-                args["token"],      # Matches 'Deposit' event key
-                args["recipient"],  # Matches 'Deposit' event key
-                args["amount"]
-            ).build_transaction({
-                "from": acct.address,
-                "nonce": nonce,
-                "gas": 2000000,
-                "gasPrice": other_w3.eth.gas_price,
-                "chainId": other_w3.eth.chain_id
-            })
 
-            signed = acct.sign_transaction(tx)
-            tx_hash = other_w3.eth.send_raw_transaction(signed.raw_transaction)
-            other_w3.eth.wait_for_transaction_receipt(tx_hash)
+            try:
+                tx_hash = build_and_send_tx(
+                    w3_dest,
+                    acct,
+                    dest_contract.functions.wrap(
+                        args["token"],
+                        args["recipient"],
+                        args["amount"]
+                    ),
+                    nonce
+                )
+                print(f"Wrapped deposit event {eid} in tx {tx_hash}")
+                state["processed"]["source"].append(eid)
+                processed_set.add(eid)
+                nonce += 1
+            except Exception as err:
+                print(f"Failed to relay Deposit event {eid}: {err}")
 
-            processed["source"].append(eid)
-            nonce += 1
+        state["last_scanned"]["source"] = latest
+        save_state(state)
+        return 1
 
- 
-    elif chain == "destination":
-        w3 = connect_to("destination")
-        other_w3 = connect_to("source")
+    else:  # destination
+        w3_dest = connect_to("destination")
+        w3_source = connect_to("source")
 
-        dest_contract = w3.eth.contract(
+        dest_contract = w3_dest.eth.contract(
             address=Web3.to_checksum_address(full["destination"]["address"]),
             abi=full["destination"]["abi"]
         )
-        source_contract = other_w3.eth.contract(
+        source_contract = w3_source.eth.contract(
             address=Web3.to_checksum_address(full["source"]["address"]),
             abi=full["source"]["abi"]
         )
 
-        latest = w3.eth.block_number
-        start_block = max(0, latest - 5)
+        latest = w3_dest.eth.block_number
+        from_block = state["last_scanned"]["destination"] + 1
+
+        if from_block > latest:
+            return 1
 
         try:
-            events = dest_contract.events.Unwrap().get_logs(
-                from_block=start_block,
-                to_block=latest
+            events = get_logs_chunked(
+                dest_contract.events.Unwrap(),
+                from_block,
+                latest,
+                CHUNK_SIZE
             )
         except Exception as err:
             print(f"Error scanning destination logs: {err}")
             return 0
 
         events = sorted(events, key=lambda e: (e["blockNumber"], e["logIndex"]))
-        nonce = other_w3.eth.get_transaction_count(acct.address)
+        processed_set = set(state["processed"]["destination"])
+        nonce = w3_source.eth.get_transaction_count(acct.address)
 
         for e in events:
             eid = event_id(e)
-            if eid in processed["destination"]:
+            if eid in processed_set:
                 continue
 
             args = e["args"]
-            
-        
-            tx = source_contract.functions.withdraw(
-                args["underlying_token"],
-                args["to"],
-                args["amount"]
-            ).build_transaction({
-                "from": acct.address,
-                "nonce": nonce,
-                "gas": 2000000,
-                "gasPrice": other_w3.eth.gas_price,
-                "chainId": other_w3.eth.chain_id
-            })
 
-            signed = acct.sign_transaction(tx)
-            tx_hash = other_w3.eth.send_raw_transaction(signed.raw_transaction)
-            other_w3.eth.wait_for_transaction_receipt(tx_hash)
+            try:
+                tx_hash = build_and_send_tx(
+                    w3_source,
+                    acct,
+                    source_contract.functions.withdraw(
+                        args["underlying_token"],
+                        args["to"],
+                        args["amount"]
+                    ),
+                    nonce
+                )
+                print(f"Withdrew for unwrap event {eid} in tx {tx_hash}")
+                state["processed"]["destination"].append(eid)
+                processed_set.add(eid)
+                nonce += 1
+            except Exception as err:
+                print(f"Failed to relay Unwrap event {eid}: {err}")
 
-            processed["destination"].append(eid)
-            nonce += 1
-
-    save_processed(processed)
-    return 1
+        state["last_scanned"]["destination"] = latest
+        save_state(state)
+        return 1
