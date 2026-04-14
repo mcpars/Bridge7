@@ -1,88 +1,4 @@
 from web3 import Web3
-from web3.providers.rpc import HTTPProvider
-from web3.middleware import ExtraDataToPOAMiddleware  # Necessary for POA chains
-from datetime import datetime
-from pathlib import Path
-import json
-import pandas as pd
-
-
-STATE_FILE = "bridge_state.json"
-
-
-def connect_to(chain):
-    if chain == 'source':  # The source contract chain is avax
-        api_url = "https://api.avax-test.network/ext/bc/C/rpc"  # AVAX C-chain testnet
-    elif chain == 'destination':  # The destination contract chain is bsc
-        api_url = "https://data-seed-prebsc-1-s1.binance.org:8545/"  # BSC testnet
-    else:
-        raise ValueError(f"Invalid chain: {chain}")
-
-    w3 = Web3(Web3.HTTPProvider(api_url))
-    w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-    return w3
-
-
-def get_contract_info(chain, contract_info):
-    """
-    Load the contract_info file into a dictionary.
-    Returns contracts["source"] or contracts["destination"].
-    """
-    try:
-        with open(contract_info, 'r') as f:
-            contracts = json.load(f)
-    except Exception as e:
-        print(f"Failed to read contract info\nPlease contact your instructor\n{e}")
-        return 0
-    return contracts[chain]
-
-
-def load_full_contract_info(contract_info="contract_info.json"):
-    with open(contract_info, "r") as f:
-        return json.load(f)
-
-
-def load_state(source_w3, destination_w3, state_file=STATE_FILE):
-    path = Path(state_file)
-    if path.exists():
-        with open(path, "r") as f:
-            return json.load(f)
-
-    return {
-        "last_source_block": max(0, source_w3.eth.block_number - 5),
-        "last_destination_block": max(0, destination_w3.eth.block_number - 5),
-        "processed_source_deposits": [],
-        "processed_destination_unwraps": []
-    }
-
-
-def save_state(state, state_file=STATE_FILE):
-    with open(state_file, "w") as f:
-        json.dump(state, f, indent=2)
-
-
-def make_event_id(event):
-    return f"{event['transactionHash'].hex()}:{event['logIndex']}"
-
-
-def sign_and_send_tx(w3, tx, private_key):
-    signed_tx = w3.eth.account.sign_transaction(tx, private_key=private_key)
-    tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
-    receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
-    return receipt.transactionHash.hex()
-
-
-def build_tx(w3, function_call, sender_address):
-    return function_call.build_transaction({
-        "from": sender_address,
-        "nonce": w3.eth.get_transaction_count(sender_address),
-        "gas": 500000,
-        "gasPrice": w3.eth.gas_price,
-        "chainId": w3.eth.chain_id
-    })
-
-
-from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 from pathlib import Path
 import json
@@ -137,8 +53,8 @@ def save_state(state, state_file=STATE_FILE):
         json.dump(state, f, indent=2)
 
 
-def make_event_id(event):
-    return f"{event['transactionHash'].hex()}:{event['logIndex']}"
+def make_event_id_from_log(log):
+    return f"{log['transactionHash'].hex()}:{log['logIndex']}"
 
 
 def sign_and_send_tx(w3, tx, private_key):
@@ -156,6 +72,36 @@ def build_tx(w3, function_call, sender_address):
         "gasPrice": w3.eth.gas_price,
         "chainId": w3.eth.chain_id
     })
+
+
+def decode_contract_events_from_block(w3, contract, block_num):
+    events = []
+    block = w3.eth.get_block(block_num, full_transactions=True)
+    contract_address = Web3.to_checksum_address(contract.address)
+
+    for tx in block.transactions:
+        try:
+            receipt = w3.eth.get_transaction_receipt(tx["hash"])
+        except Exception:
+            continue
+
+        for log in receipt["logs"]:
+            if Web3.to_checksum_address(log["address"]) != contract_address:
+                continue
+
+            # Try each event type defined on the contract ABI
+            for event_name in ["Deposit", "Unwrap"]:
+                if not hasattr(contract.events, event_name):
+                    continue
+                event_cls = getattr(contract.events, event_name)
+                try:
+                    decoded = event_cls().process_log(log)
+                    events.append(decoded)
+                    break
+                except Exception:
+                    pass
+
+    return events
 
 
 def scan_blocks(chain, contract_info="contract_info.json"):
@@ -200,7 +146,7 @@ def scan_blocks(chain, contract_info="contract_info.json"):
                 continue
 
             for event in deposit_events:
-                event_id = make_event_id(event)
+                event_id = f"{event['transactionHash'].hex()}:{event['logIndex']}"
                 if event_id in state["processed_source_deposits"]:
                     continue
 
@@ -241,16 +187,20 @@ def scan_blocks(chain, contract_info="contract_info.json"):
 
         for block_num in range(from_block, to_block + 1):
             try:
-                unwrap_events = destination_contract.events.Unwrap.get_logs(
-                    from_block=block_num,
-                    to_block=block_num
+                decoded_events = decode_contract_events_from_block(
+                    destination_w3,
+                    destination_contract,
+                    block_num
                 )
             except Exception as e:
-                print(f"Failed to fetch Unwrap logs for block {block_num}: {e}")
+                print(f"Failed to inspect block {block_num}: {e}")
                 continue
 
-            for event in unwrap_events:
-                event_id = make_event_id(event)
+            for event in decoded_events:
+                if event["event"] != "Unwrap":
+                    continue
+
+                event_id = make_event_id_from_log(event)
                 if event_id in state["processed_destination_unwraps"]:
                     continue
 
@@ -284,7 +234,3 @@ def scan_blocks(chain, contract_info="contract_info.json"):
 
     save_state(state)
     return 1
-
-if __name__ == "__main__":
-    scan_blocks("source")
-    scan_blocks("destination")
